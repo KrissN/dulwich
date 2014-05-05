@@ -74,7 +74,7 @@ def _fileno_can_read(fileno):
     return len(select.select([fileno], [], [], 0)[0]) > 0
 
 COMMON_CAPABILITIES = ['ofs-delta', 'side-band-64k']
-FETCH_CAPABILITIES = ['thin-pack', 'multi_ack', 'multi_ack_detailed'] + COMMON_CAPABILITIES
+FETCH_CAPABILITIES = ['thin-pack', 'multi_ack', 'multi_ack_detailed', 'shallow'] + COMMON_CAPABILITIES
 SEND_CAPABILITIES = ['report-status'] + COMMON_CAPABILITIES
 
 
@@ -190,7 +190,7 @@ class GitClient(object):
         """
         raise NotImplementedError(self.send_pack)
 
-    def fetch(self, path, target, determine_wants=None, progress=None):
+    def fetch(self, path, target, determine_wants=None, progress=None, depth=None):
         """Fetch into a target repository.
 
         :param path: Path to fetch from
@@ -205,7 +205,7 @@ class GitClient(object):
         f, commit, abort = target.object_store.add_pack()
         try:
             result = self.fetch_pack(path, determine_wants,
-                    target.get_graph_walker(), f.write, progress)
+                    target.get_graph_walker(), f.write, progress, depth)
         except:
             abort()
             raise
@@ -336,7 +336,7 @@ class GitClient(object):
             self._report_status_parser.check()
 
     def _handle_upload_pack_head(self, proto, capabilities, graph_walker,
-                                 wants, can_read):
+                                 wants, can_read, depth):
         """Handle the head of a 'git-upload-pack' request.
 
         :param proto: Protocol object to read from
@@ -351,24 +351,35 @@ class GitClient(object):
             wants[0], ' '.join(capabilities)))
         for want in wants[1:]:
             proto.write_pkt_line('want %s\n' % want)
+        if depth is not None:
+            proto.write_pkt_line('deepen %i\n' % depth)
         proto.write_pkt_line(None)
-        have = next(graph_walker)
-        while have:
-            proto.write_pkt_line('have %s\n' % have)
-            if can_read():
+        if depth is not None:
+            pkt = proto.read_pkt_line()
+            while pkt is not None:
+                shallow = pkt.rstrip('\n').split(' ')
+                if shallow[0] != 'shallow':
+                    raise AssertionError("Expected 'shallow'")
+                graph_walker.shallow(shallow[1])
                 pkt = proto.read_pkt_line()
-                parts = pkt.rstrip('\n').split(' ')
-                if parts[0] == 'ACK':
-                    graph_walker.ack(parts[1])
-                    if parts[2] in ('continue', 'common'):
-                        pass
-                    elif parts[2] == 'ready':
-                        break
-                    else:
-                        raise AssertionError(
-                            "%s not in ('continue', 'ready', 'common)" %
-                            parts[2])
+        else:
             have = next(graph_walker)
+            while have:
+                proto.write_pkt_line('have %s\n' % have)
+                if can_read():
+                    pkt = proto.read_pkt_line()
+                    parts = pkt.rstrip('\n').split(' ')
+                    if parts[0] == 'ACK':
+                        graph_walker.ack(parts[1])
+                        if parts[2] in ('continue', 'common'):
+                            pass
+                        elif parts[2] == 'ready':
+                            break
+                        else:
+                            raise AssertionError(
+                                "%s not in ('continue', 'ready', 'common)" %
+                                parts[2])
+                have = next(graph_walker)
         proto.write_pkt_line('done\n')
 
     def _handle_upload_pack_tail(self, proto, capabilities, graph_walker,
@@ -498,7 +509,7 @@ class TraditionalGitClient(GitClient):
         return new_refs
 
     def fetch_pack(self, path, determine_wants, graph_walker, pack_data,
-                   progress=None):
+                   progress=None, depth=None):
         """Retrieve a pack from a git smart server.
 
         :param determine_wants: Callback that returns list of commits to fetch
@@ -525,7 +536,7 @@ class TraditionalGitClient(GitClient):
             proto.write_pkt_line(None)
             return refs
         self._handle_upload_pack_head(proto, negotiated_capabilities,
-            graph_walker, wants, can_read)
+            graph_walker, wants, can_read, depth)
         self._handle_upload_pack_tail(proto, negotiated_capabilities,
             graph_walker, pack_data, progress)
         return refs

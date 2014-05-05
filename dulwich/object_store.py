@@ -1106,3 +1106,6 @@ class ObjectStoreGraphWalker(object):
             self.heads.update([p for p in ps if not p in self.parents])
             return ret
         return None
+
+    def shallow(self, sha):
+        pass
